@@ -42,6 +42,6 @@ Este repositorio contiene una versión del workflow **limpia de datos reales**: 
 
 ## Autor
 
-Hugo Gallardo Douville — [LinkedIn](https://linkedin.com/in/hugogallardo-douville)
+Hugo Gallardo Douville — [LinkedIn](www.linkedin.com/in/hugo-gallardo-douville-aurialceo)
 
 Proyecto desarrollado como parte de **Aurial**, iniciativa propia de automatización con IA para pequeñas empresas.
