@@ -1,0 +1,939 @@
+{
+  "name": "AI Invoice Management System",
+  "nodes": [
+    {
+      "parameters": {
+        "additionalFields": {
+          "download": false
+        }
+      },
+      "id": "6f6355fe-2d7c-469a-bfbd-bd66818fcbf1",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        -992,
+        160
+      ],
+      "webhookId": "webhook-placeholder-001",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $input.first().json.message;\nconst text = (msg.text || '').trim();\nconst chatId = msg.chat.id;\nconst staticData = $getWorkflowStaticData('global');\nconst estado = staticData[String(chatId)]?.estado;\n\n// ── COMANDO: facturas ──\nif (text.toLowerCase() === 'facturas') {\n  return [{ json: {\n    _action: 'ERROR',\n    chatId,\n    message: '📊 *Consulta tus facturas:*\\n\\n[Ver Google Sheets](https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit)'\n  }}];\n}\n\n// ── CASO 1: Responde SI ──\nif (text.toUpperCase() === 'SI' && estado === 'WAITING_CONFIRM') {\n  const factura = staticData[String(chatId)].factura;\n  delete staticData[String(chatId)];\n  // _action: 'CONFIRMAR' va AL FINAL para no ser sobreescrito por ...factura\n  return [{ json: { chatId, ...factura, _action: 'CONFIRMAR' } }];\n}\n\n// ── CASO 2: Responde NO ──\nif (text.toUpperCase() === 'NO' && estado === 'WAITING_CONFIRM') {\n  delete staticData[String(chatId)];\n  return [{ json: { _action: 'CANCELAR', chatId } }];\n}\n\n// ── CASO 3: Nueva factura ──\nconst splitRegex = /(?:primera|segunda|tercera|cuarta|quinta|sexta|septima|séptima|octava|novena|decima|décima|1a|2a|3a|4a|5a|1ª|2ª|3ª|factura\\s*\\d+)\\s*:?/gi;\nconst parts = text.split(splitRegex).filter(p => p.trim().length > 0);\nconst bloques = parts.length > 0 ? parts : [text];\n\nconst errorMsg = `❌ No he podido leer los datos de la factura.\n\n📋 *Ejemplo de mensaje:*\n\nCliente Restaurante ABC S.L.\nNIF B12345678\nDirección Calle Mayor 10, Barcelona\nConcepto Cena de empresa\n12 comensales\nImporte total 420\nFecha 28/02/2026\nPago Transferencia\n\n💡 *Para el precio (IVA incluido):*\n- *Importe total 420* → divide entre comensales\n- *Precio persona 35* → multiplica por comensales\n\nℹ️ Los dos puntos son opcionales\n\n➕ *Varias facturas:*\nPrimera\n(campos...)\nSegunda\n(campos...)`;\n\nconst get = (block, keys) => {\n  for (const key of keys) {\n    const escaped = key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n    const m = block.match(new RegExp('^[ \\\\t]*' + escaped + '[ \\\\t]*:?[ \\\\t]*(.+)', 'im'));\n    if (m && m[1].trim()) return m[1].trim();\n  }\n  return '';\n};\n\nconst getPersonas = (block) => {\n  const keys = [\n    'Personas','Num personas','Número personas','Numero personas','Número de personas',\n    'Comensales','Num comensales','Número comensales','Numero comensales','Número de comensales',\n    'Pax','Invitados','Asistentes','Num asistentes','Número asistentes',\n    'Numero asistentes','Número de asistentes',\n    'Clientes','Num clientes','Número clientes',\n    'Cubiertos','Plazas','Reserva para','Grupo de','Cantidad'\n  ];\n  const standard = get(block, keys);\n  if (standard) {\n    const num = parseInt(standard);\n    if (num > 0) return num;\n  }\n  const reverseKeys = [\n    'personas','comensales','pax','invitados','asistentes',\n    'clientes','cubiertos','plazas','menus','menús'\n  ];\n  for (const key of reverseKeys) {\n    const m = block.match(new RegExp('^[ \\\\t]*(\\\\d+)\\\\s+' + key, 'im'));\n    if (m) return parseInt(m[1]);\n  }\n  return 0;\n};\n\nconst cleanNumber = (str) => {\n  if (!str) return 0;\n  let cleaned = str\n    .replace(/€/g, '')\n    .replace(/\\s/g, '')\n    .replace(/\\.+$/, '')\n    .trim();\n  if (/^\\d{1,3}(\\.\\d{3})+(,\\d+)?$/.test(cleaned)) {\n    cleaned = cleaned.replace(/\\./g, '').replace(',', '.');\n  } else if (/,\\d{1,2}$/.test(cleaned)) {\n    cleaned = cleaned.replace(',', '.');\n  }\n  const dotParts = cleaned.split('.');\n  if (dotParts.length > 2) {\n    const last = dotParts.pop();\n    cleaned = dotParts.join('') + '.' + last;\n  }\n  return parseFloat(cleaned) || 0;\n};\n\nconst facturas = [];\nconst now = new Date();\n\nbloques.forEach((block) => {\n\n  const cliente = get(block, [\n    'Cliente','Nombre cliente','Nombre del cliente',\n    'Razon social','Razón social','Empresa',\n    'Nombre empresa','Nombre de la empresa',\n    'Facturar a','A nombre de','Nombre',\n    'Sociedad','Compañia','Compañía'\n  ]);\n\n  const nif = get(block, [\n    'NIF','CIF','DNI','NIF/CIF','NIF-CIF',\n    'Numero fiscal','Número fiscal',\n    'Identificacion fiscal','Identificación fiscal',\n    'ID fiscal','Documento','Nif','Cif'\n  ]);\n\n  const direccion = get(block, [\n    'Direccion','Dirección','Dir',\n    'Domicilio','Domicilio fiscal','Domicilio social',\n    'Direccion fiscal','Dirección fiscal',\n    'Calle','Ubicacion','Ubicación',\n    'Direccion cliente','Dirección cliente',\n    'Domicilio cliente','C/'\n  ]);\n\n  const emailCliente = get(block, [\n    'Email cliente','EmailCliente','Email',\n    'Correo','Correo electronico','Correo electrónico',\n    'Mail','E-mail','Correo cliente',\n    'Correo del cliente','Email del cliente'\n  ]);\n\n  const concepto = get(block, [\n    'Concepto','Descripcion','Descripción',\n    'Servicio','Detalle','Detalle servicio',\n    'Tipo servicio','Tipo de servicio',\n    'Motivo','Evento','Tipo evento',\n    'Tipo de evento','Menu','Menú',\n    'Celebracion','Celebración','Para'\n  ]);\n\n  const personas = getPersonas(block) || 1;\n\n  const precioRaw = get(block, [\n    'PrecioUnitario','Precio unitario',\n    'Precio por persona','PrecioPersona','Precio persona',\n    'Importe unitario','Importe por persona',\n    'Precio por comensal','Precio comensal',\n    'Precio menu','Precio menú',\n    'Precio por cubierto','Precio cubierto',\n    'Precio por pax','Precio pax',\n    'Coste por persona','Coste persona',\n    'Coste unitario','Coste por comensal',\n    'Tarifa','Tarifa por persona',\n    'Precio individual','Por persona',\n    'Por comensal','Por cubierto',\n    'Precio','Coste'\n  ]);\n\n  const importeRaw = get(block, [\n    'ImporteTotal','Importe total','Importe',\n    'Total servicio','Precio total',\n    'Total','Coste total',\n    'Importe servicio','Importe del servicio',\n    'Facturar','Monto','Monto total',\n    'Suma','Suma total','Valor',\n    'Valor total','Precio servicio',\n    'Total evento','Importe evento'\n  ]);\n\n  const fechaServicio = get(block, [\n    'Fecha servicio','FechaServicio',\n    'Fecha del servicio','Fecha evento',\n    'Fecha del evento','Fecha',\n    'Dia','Día','Dia servicio','Día servicio',\n    'Dia del servicio','Día del servicio',\n    'Dia evento','Día evento',\n    'Cuando','Cuándo','Fecha celebracion',\n    'Fecha celebración','Fecha reserva'\n  ]);\n\n  const formaPago = get(block, [\n    'Forma de pago','FormaPago','Forma pago',\n    'Pago','Metodo pago','Método de pago',\n    'Metodo de pago','Método pago',\n    'Tipo pago','Tipo de pago',\n    'Como paga','Cómo paga',\n    'Medio de pago','Medio pago',\n    'Pagado con','Paga con','Paga por',\n    'Pagado','Cobrado','Cobro'\n  ]) || 'Transferencia bancaria';\n\n  const mensajeCliente = get(block, [\n    'Mensaje cliente','MensajeCliente','Mensaje',\n    'Texto cliente','Nota','Notas',\n    'Observaciones','Comentario','Comentarios',\n    'Mensaje personalizado','Texto factura',\n    'Texto para el cliente','Dedicatoria'\n  ]) || `Estimado/a ${cliente},\\n\\nAdjunto encontrará la factura correspondiente a los servicios prestados en nuestro restaurante.\\n\\nQuedamos a su disposición para cualquier consulta.\\n\\nAtentamente,\\n[Nombre del Negocio]\\nTel: [Teléfono del Negocio]`;\n\n  if (!cliente) return;\n\n  const precioDirecto = cleanNumber(precioRaw);\n  const importeTotal  = cleanNumber(importeRaw);\n\n  let totalConIva;\n  if (importeTotal > 0) {\n    totalConIva = importeTotal;\n  } else if (precioDirecto > 0) {\n    totalConIva = precioDirecto * personas;\n  } else {\n    totalConIva = 0;\n  }\n\n  const baseImponible = totalConIva / 1.10;\n  const iva = totalConIva - baseImponible;\n  const precioUnitarioSinIva = personas > 0 ? baseImponible / personas : 0;\n\n  const facturaData = {\n    chatId,\n    cliente, nif, direccion, emailCliente, concepto,\n    personas,\n    precioUnitario: precioUnitarioSinIva.toFixed(2),\n    baseImponible: baseImponible.toFixed(2),\n    iva: iva.toFixed(2),\n    total: totalConIva.toFixed(2),\n    fechaServicio, formaPago, mensajeCliente,\n    fechaEmision: now.toLocaleDateString('es-ES')\n  };\n\n  // Guardar en staticData SIN _action para no contaminar\n  staticData[String(chatId)] = {\n    estado: 'WAITING_CONFIRM',\n    factura: { ...facturaData }\n  };\n\n  // _action PREVIEW solo para el output, no se guarda en staticData\n  facturas.push({ ...facturaData, _action: 'PREVIEW' });\n});\n\nif (facturas.length === 0) {\n  return [{ json: { _action: 'ERROR', chatId, message: errorMsg } }];\n}\n\nreturn facturas.map(f => ({ json: f }));"
+      },
+      "id": "e3219b7f-f65c-4f38-857f-17828266b99a",
+      "name": "Parsear Facturas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json._action }}",
+              "value2": "PREVIEW"
+            }
+          ]
+        }
+      },
+      "id": "7dfe086f-f19e-41b2-bca4-333e23a8ec7d",
+      "name": "¿Qué acción?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst logoB64 = 'PLACEHOLDER_BASE64_LOGO_IMAGE';\nconst html = `<!DOCTYPE html>\n<html lang='es'>\n<head><meta charset='UTF-8'>\n<style>\n* { margin:0; padding:0; box-sizing:border-box; }\nbody { font-family:Arial,sans-serif; color:#333; padding:40px; font-size:13px; }\n.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:30px; border-bottom:3px solid #1a1a1a; padding-bottom:20px; }\n.logo { width:100px; height:100px; border-radius:50%; object-fit:cover; }\n.empresa-info { text-align:right; }\n.empresa-nombre { font-size:22px; font-weight:bold; color:#1a1a1a; }\n.empresa-sub { font-size:11px; color:#E8843A; font-weight:bold; letter-spacing:1px; margin-bottom:6px; }\n.empresa-info p { font-size:12px; color:#555; line-height:1.7; }\n.factura-titulo { background:#1a1a1a; color:#E8843A; text-align:center; padding:10px; font-size:20px; font-weight:bold; letter-spacing:3px; margin-bottom:24px; border-radius:4px; }\n.datos-grid { display:flex; gap:24px; margin-bottom:24px; }\n.datos-box { flex:1; background:#f9f9f9; border:1px solid #e0e0e0; border-radius:6px; padding:14px; }\n.datos-box h3 { font-size:10px; font-weight:bold; color:#E8843A; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; border-bottom:1px solid #e0e0e0; padding-bottom:5px; }\n.datos-box p { font-size:12px; color:#444; line-height:1.8; }\ntable { width:100%; border-collapse:collapse; margin-bottom:16px; }\nthead tr { background:#1a1a1a; color:white; }\nthead th { padding:10px 12px; text-align:left; font-size:12px; }\ntbody tr { border-bottom:1px solid #eee; }\ntbody td { padding:10px 12px; font-size:12px; color:#444; }\ntbody td:last-child { text-align:right; font-weight:bold; }\n.totales { width:260px; margin-left:auto; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden; }\n.totales tr td { padding:9px 14px; font-size:13px; }\n.totales tr td:last-child { text-align:right; }\n.totales tr:not(:last-child) { border-bottom:1px solid #eee; }\n.total-row { background:#1a1a1a; }\n.total-row td { color:white !important; font-weight:bold; font-size:15px; }\n.iva-row td { color:#E8843A; font-weight:bold; }\n.pago-box { margin-top:20px; background:#fff8f0; border:1px solid #E8843A; border-radius:6px; padding:12px 16px; }\n.pago-box h3 { font-size:10px; color:#E8843A; font-weight:bold; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; }\n.pago-box p { font-size:12px; color:#555; }\n.footer { margin-top:30px; text-align:center; font-size:10px; color:#aaa; border-top:1px solid #eee; padding-top:12px; }\n</style></head>\n<body>\n<div class='header'>\n  <img src='data:image/jpeg;base64,${logoB64}' class='logo' alt='[Nombre del Negocio]'/>\n  <div class='empresa-info'>\n    <div class='empresa-sub'>BRASERÍA · DEGUSTACIÓN</div>\n    <div class='empresa-nombre'>[Nombre del Negocio]</div>\n    <p>NIF: [NIF del Negocio]</p>\n    <p>[Dirección del Negocio]</p>\n    <p>Tel: [Teléfono del Negocio]</p>\n    <p>[email@negocio.com]</p>\n  </div>\n</div>\n<div class='factura-titulo'>FACTURA</div>\n<div class='datos-grid'>\n  <div class='datos-box'>\n    <h3>Datos del cliente</h3>\n    <p><strong>Nombre:</strong> ${d.cliente}</p>\n    <p><strong>NIF/CIF:</strong> ${d.nif}</p>\n    <p><strong>Dirección:</strong> ${d.direccion}</p>\n  </div>\n  <div class='datos-box'>\n    <h3>Datos de la factura</h3>\n    <p><strong>Nº Factura:</strong> ${d.invoiceNumber}</p>\n    <p><strong>Fecha emisión:</strong> ${d.fechaEmision}</p>\n    <p><strong>Fecha servicio:</strong> ${d.fechaServicio}</p>\n    <p><strong>Forma de pago:</strong> ${d.formaPago}</p>\n  </div>\n</div>\n<table>\n  <thead><tr><th>Concepto</th><th style='text-align:center'>Unidades</th><th style='text-align:right'>Precio unit.</th><th>Importe</th></tr></thead>\n  <tbody><tr>\n    <td>${d.concepto}</td>\n    <td style='text-align:center'>${d.personas} personas</td>\n    <td style='text-align:right'>${d.precioUnitario} €</td>\n    <td>${d.baseImponible} €</td>\n  </tr></tbody>\n</table>\n<table class='totales'>\n  <tr><td>Base imponible</td><td>${d.baseImponible} €</td></tr>\n  <tr class='iva-row'><td>IVA (10%)</td><td>${d.iva} €</td></tr>\n  <tr class='total-row'><td>TOTAL</td><td>${d.total} €</td></tr>\n</table>\n<div class='pago-box'>\n  <h3>Información de pago</h3>\n  <p><strong>Forma de pago:</strong> ${d.formaPago}</p>\n  <p>[Nombre del Negocio] · NIF: [NIF del Negocio] · [Dirección del Negocio]</p>\n</div>\n<div class='footer'>\n  [Nombre del Negocio] · [Dirección del Negocio] · Tel: [Teléfono del Negocio]<br>\n  Documento generado el ${d.fechaEmision} · ${d.invoiceNumber}\n</div>\n</body></html>`;\nreturn [{ json: { ...d, html } }];"
+      },
+      "id": "2c4a96a2-7a2f-482e-8c88-be1a747c5d07",
+      "name": "Generar HTML Factura",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const htmlContent = $input.first().json.html;\nconst data = $input.first().json;\nconst buffer = Buffer.from(htmlContent, 'utf-8');\nreturn [{\n  json: { ...data },\n  binary: {\n    html: {\n      data: buffer.toString('base64'),\n      mimeType: 'text/html',\n      fileName: 'index.html',\n      fileExtension: 'html'\n    }\n  }\n}];"
+      },
+      "id": "faf88d7e-682d-49a4-94fb-7befaaa87a23",
+      "name": "HTML a Binario",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "html"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "2333ad2a-78db-4d41-9831-496601f81274",
+      "name": "Convertir a PDF (Gotenberg)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        784,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Calcular Nº Factura').item.json.chatId }}",
+        "text": "=📋 *FACTURA PENDIENTE DE CONFIRMAR*\n\n🔢 *Nº:* {{ $('Calcular Nº Factura').item.json.invoiceNumber }}\n👤 *Cliente:* {{ $('Calcular Nº Factura').item.json.cliente }}\n🏢 *NIF:* {{ $('Calcular Nº Factura').item.json.nif }}\n🍽️ *Concepto:* {{ $('Calcular Nº Factura').item.json.concepto }}\n👥 *Personas:* {{ $('Calcular Nº Factura').item.json.personas }} × {{ $('Calcular Nº Factura').item.json.precioUnitario }}€\n💶 *Base:* {{ $('Calcular Nº Factura').item.json.baseImponible }}€\n🧾 *IVA (10%):* {{ $('Calcular Nº Factura').item.json.iva }}€\n✅ *TOTAL: {{ $('Calcular Nº Factura').item.json.total }}€*\n📅 *Fecha servicio:* {{ $('Calcular Nº Factura').item.json.fechaServicio }}\n💳 *Pago:* {{ $('Calcular Nº Factura').item.json.formaPago }}\n\n¿Es correcta esta factura?\nResponde *SI* para guardar en Drive y Sheets\nResponde *NO* para cancelar",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "1c12dc70-ff34-42ba-9eee-ec487f371b97",
+      "name": "Enviar Preview Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1024,
+        144
+      ],
+      "webhookId": "webhook-placeholder-002",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "❌ *Factura cancelada.*\n\nNo se ha guardado nada. Vuelve a enviar los datos cuando quieras.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "43e76ad6-40b1-49e2-b418-0aee1b39beb7",
+      "name": "Telegram Cancelado",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        544,
+        544
+      ],
+      "webhookId": "webhook-placeholder-003",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst logoB64 = 'PLACEHOLDER_BASE64_LOGO_IMAGE';\nconst html = `<!DOCTYPE html>\n<html lang='es'>\n<head><meta charset='UTF-8'>\n<style>\n* { margin:0; padding:0; box-sizing:border-box; }\nbody { font-family:Arial,sans-serif; color:#333; padding:40px; font-size:13px; }\n.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:30px; border-bottom:3px solid #1a1a1a; padding-bottom:20px; }\n.logo { width:100px; height:100px; border-radius:50%; object-fit:cover; }\n.empresa-info { text-align:right; }\n.empresa-nombre { font-size:22px; font-weight:bold; color:#1a1a1a; }\n.empresa-sub { font-size:11px; color:#E8843A; font-weight:bold; letter-spacing:1px; margin-bottom:6px; }\n.empresa-info p { font-size:12px; color:#555; line-height:1.7; }\n.factura-titulo { background:#1a1a1a; color:#E8843A; text-align:center; padding:10px; font-size:20px; font-weight:bold; letter-spacing:3px; margin-bottom:24px; border-radius:4px; }\n.datos-grid { display:flex; gap:24px; margin-bottom:24px; }\n.datos-box { flex:1; background:#f9f9f9; border:1px solid #e0e0e0; border-radius:6px; padding:14px; }\n.datos-box h3 { font-size:10px; font-weight:bold; color:#E8843A; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; border-bottom:1px solid #e0e0e0; padding-bottom:5px; }\n.datos-box p { font-size:12px; color:#444; line-height:1.8; }\ntable { width:100%; border-collapse:collapse; margin-bottom:16px; }\nthead tr { background:#1a1a1a; color:white; }\nthead th { padding:10px 12px; text-align:left; font-size:12px; }\ntbody tr { border-bottom:1px solid #eee; }\ntbody td { padding:10px 12px; font-size:12px; color:#444; }\ntbody td:last-child { text-align:right; font-weight:bold; }\n.totales { width:260px; margin-left:auto; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden; }\n.totales tr td { padding:9px 14px; font-size:13px; }\n.totales tr td:last-child { text-align:right; }\n.totales tr:not(:last-child) { border-bottom:1px solid #eee; }\n.total-row { background:#1a1a1a; }\n.total-row td { color:white !important; font-weight:bold; font-size:15px; }\n.iva-row td { color:#E8843A; font-weight:bold; }\n.pago-box { margin-top:20px; background:#fff8f0; border:1px solid #E8843A; border-radius:6px; padding:12px 16px; }\n.pago-box h3 { font-size:10px; color:#E8843A; font-weight:bold; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; }\n.pago-box p { font-size:12px; color:#555; }\n.footer { margin-top:30px; text-align:center; font-size:10px; color:#aaa; border-top:1px solid #eee; padding-top:12px; }\n</style></head>\n<body>\n<div class='header'>\n  <img src='data:image/jpeg;base64,${logoB64}' class='logo' alt='[Nombre del Negocio]'/>\n  <div class='empresa-info'>\n    <div class='empresa-sub'>BRASERÍA · DEGUSTACIÓN</div>\n    <div class='empresa-nombre'>[Nombre del Negocio]</div>\n    <p>NIF: [NIF del Negocio]</p>\n    <p>[Dirección del Negocio]</p>\n    <p>Tel: [Teléfono del Negocio]</p>\n    <p>[email@negocio.com]</p>\n  </div>\n</div>\n<div class='factura-titulo'>FACTURA</div>\n<div class='datos-grid'>\n  <div class='datos-box'>\n    <h3>Datos del cliente</h3>\n    <p><strong>Nombre:</strong> ${d.cliente}</p>\n    <p><strong>NIF/CIF:</strong> ${d.nif}</p>\n    <p><strong>Dirección:</strong> ${d.direccion}</p>\n  </div>\n  <div class='datos-box'>\n    <h3>Datos de la factura</h3>\n    <p><strong>Nº Factura:</strong> ${d.invoiceNumber}</p>\n    <p><strong>Fecha emisión:</strong> ${d.fechaEmision}</p>\n    <p><strong>Fecha servicio:</strong> ${d.fechaServicio}</p>\n    <p><strong>Forma de pago:</strong> ${d.formaPago}</p>\n  </div>\n</div>\n<table>\n  <thead><tr><th>Concepto</th><th style='text-align:center'>Unidades</th><th style='text-align:right'>Precio unit.</th><th>Importe</th></tr></thead>\n  <tbody><tr>\n    <td>${d.concepto}</td>\n    <td style='text-align:center'>${d.personas} personas</td>\n    <td style='text-align:right'>${d.precioUnitario} €</td>\n    <td>${d.baseImponible} €</td>\n  </tr></tbody>\n</table>\n<table class='totales'>\n  <tr><td>Base imponible</td><td>${d.baseImponible} €</td></tr>\n  <tr class='iva-row'><td>IVA (10%)</td><td>${d.iva} €</td></tr>\n  <tr class='total-row'><td>TOTAL</td><td>${d.total} €</td></tr>\n</table>\n<div class='pago-box'>\n  <h3>Información de pago</h3>\n  <p><strong>Forma de pago:</strong> ${d.formaPago}</p>\n  <p>[Nombre del Negocio] · NIF: [NIF del Negocio] · [Dirección del Negocio]</p>\n</div>\n<div class='footer'>\n  [Nombre del Negocio] · [Dirección del Negocio] · Tel: [Teléfono del Negocio]<br>\n  Documento generado el ${d.fechaEmision} · ${d.invoiceNumber}\n</div>\n</body></html>`;\nreturn [{ json: { ...d, html } }];"
+      },
+      "id": "6ebd6197-8423-4f09-b17a-f03233646ccf",
+      "name": "Generar HTML Confirmar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const htmlContent = $input.first().json.html;\nconst data = $input.first().json;\nconst buffer = Buffer.from(htmlContent, 'utf-8');\nreturn [{\n  json: { ...data },\n  binary: {\n    html: {\n      data: buffer.toString('base64'),\n      mimeType: 'text/html',\n      fileName: 'index.html',\n      fileExtension: 'html'\n    }\n  }\n}];"
+      },
+      "id": "959087ec-9a98-4e4f-86b5-fb411338edd7",
+      "name": "HTML a Binario Confirmar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "html"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "11baad2b-80fe-44f9-8731-af785742354f",
+      "name": "Convertir a PDF Confirmar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1024,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "name": "=={{ $json.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+          "mode": "list",
+          "cachedResultName": "Facturas 2026",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/YOUR_GOOGLE_DRIVE_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "id": "d192ce1e-193b-42c5-8b6f-1fdb2e23239d",
+      "name": "Subir PDF a Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1264,
+        400
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Hoja 1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Nº Factura": "={{ $('Code in JavaScript').item.json['Nº Factura'] }}",
+            "NIF": "={{ $('Code in JavaScript').item.json['NIF'] }}",
+            "Concepto": "={{ $('Code in JavaScript').item.json['Concepto'] }}",
+            "Personas": "={{ $('Code in JavaScript').item.json['Personas'] }}",
+            " Precio Unitario": "={{ $('Code in JavaScript').item.json['Precio Unitario'] }}",
+            "Base Imponible": "={{ $('Code in JavaScript').item.json['Base Imponible'] }}",
+            "IVA": "={{ $('Code in JavaScript').item.json['IVA'] }}",
+            "Total": "={{ $('Code in JavaScript').item.json['Total'] }}",
+            "Fecha Servicio": "={{ $('Code in JavaScript').item.json['Fecha Servicio'] }}",
+            "Fecha Emisión": "={{ $('Code in JavaScript').item.json['Fecha Emisión'] }}",
+            "Forma de Pago": "={{ $('Code in JavaScript').item.json['Forma de Pago'] }}",
+            "Enlace PDF": "={{ $('Code in JavaScript').item.json['Enlace PDF'] }}",
+            "Cliente": "={{ $('Code in JavaScript').item.json['Cliente'] }}"
+          },
+          "matchingColumns": [
+            "Nº Factura"
+          ],
+          "schema": [
+            {
+              "id": "Nº Factura",
+              "displayName": "Nº Factura",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Cliente",
+              "displayName": "Cliente",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "NIF",
+              "displayName": "NIF",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Concepto",
+              "displayName": "Concepto",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Personas",
+              "displayName": "Personas",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": " Precio Unitario",
+              "displayName": " Precio Unitario",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Base Imponible",
+              "displayName": "Base Imponible",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "IVA",
+              "displayName": "IVA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Total",
+              "displayName": "Total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Fecha Servicio",
+              "displayName": "Fecha Servicio",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Fecha Emisión",
+              "displayName": "Fecha Emisión",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Forma de Pago",
+              "displayName": "Forma de Pago",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Enlace PDF",
+              "displayName": "Enlace PDF",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "25875621-c0f6-4403-82ae-29d62686518a",
+      "name": "Registrar en Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1712,
+        400
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parsear Facturas').item.json.chatId }}",
+        "text": "=✅✅ *Factura guardada correctamente*\n\n📄 *Nº:* {{ $('Parsear Facturas').item.json.invoiceNumber }}\n👤 *Cliente:* {{ $('Parsear Facturas').item.json.cliente }}\n🍽️ *Concepto:* {{ $('Parsear Facturas').item.json.concepto }}\n👥 *Personas:* {{ $('Parsear Facturas').item.json.personas }}\n💶 *Total:* {{ $('Parsear Facturas').item.json.total }}€\n📅 *Fecha servicio:* {{ $('Parsear Facturas').item.json.fechaServicio }}\n\n📁 [Ver PDF en Drive]({{ $('Subir PDF a Google Drive').item.json.webViewLink }})\n📊 Registrado en base de datos",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "d1abaa82-89a6-462c-9956-1a6d1bee89c2",
+      "name": "Telegram Guardado OK",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1952,
+        400
+      ],
+      "webhookId": "webhook-placeholder-004",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ================================================================\n// CALCULAR Nº FACTURA CORRELATIVO\n// ================================================================\n\n// El input viene del Sheet (Obtener Último Nº)\n// Los datos de la factura vienen de Parsear Facturas\nconst parsearItem = $('Parsear Facturas').first().json;\nconst action = parsearItem._action;\n\n// Si es CONFIRMAR, CANCELAR o ERROR → no debería llegar aquí\n// pero por seguridad lo dejamos pasar\nif (action === 'CONFIRMAR' || action === 'CANCELAR' || action === 'ERROR') {\n  return [{ json: parsearItem }];\n}\n\nconst year = new Date().getFullYear();\nlet nextNumber = 1;\n\n// Las filas del Sheet vienen por $input\nconst rows = $input.all();\n\nif (rows && rows.length > 0) {\n  const nums = rows\n    .map(r => r.json['Nº Factura'])\n    .filter(n => n && String(n).trim().match(/^FAC-\\d{4}-\\d+$/))\n    .map(n => {\n      const parts = String(n).trim().split('-');\n      return parseInt(parts[2]) || 0;\n    })\n    .filter(n => n > 0);\n\n  if (nums.length > 0) {\n    nextNumber = Math.max(...nums) + 1;\n  }\n}\n\nconst invoiceNumber = `FAC-${year}-${String(nextNumber).padStart(3, '0')}`;\nconst clienteLimpio = (parsearItem.cliente || 'cliente')\n  .replace(/\\s+/g,'_')\n  .replace(/[^a-zA-Z0-9_]/g,'');\nconst fileName = `${invoiceNumber}_${clienteLimpio}.pdf`;\n\n// Actualizar staticData con el invoiceNumber correcto\nconst staticData = $getWorkflowStaticData('global');\nconst chatId = String(parsearItem.chatId);\n\nif (staticData[chatId]) {\n  staticData[chatId].factura.invoiceNumber = invoiceNumber;\n  staticData[chatId].factura.fileName = fileName;\n}\n\nreturn [{ json: { ...parsearItem, invoiceNumber, fileName } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -176,
+        144
+      ],
+      "id": "c63ea8aa-a458-45e3-a34a-163ebc904b2c",
+      "name": "Calcular Nº Factura",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "BASE DE DATOS",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Hoja 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -384,
+        144
+      ],
+      "id": "b71c2730-fb65-4c74-b9f2-85ad4ede3872",
+      "name": "Obtener Último Nº",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json._action }}",
+                    "rightValue": "PREVIEW",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "2cb0843f-7b46-42fc-adae-61e54ee2cc93"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "517b3fcc-ac2f-4534-8883-71ca808c459d",
+                    "leftValue": "={{ $json._action }}",
+                    "rightValue": "CONFIRMAR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "97e216ba-cf74-4a27-9e10-0da939914d68",
+                    "leftValue": "={{ $json._action }}",
+                    "rightValue": "CANCELAR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3d9a5a2e-d883-4a07-b759-db08e0affa87",
+                    "leftValue": "={{ $json._action }}",
+                    "rightValue": "ERROR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        64,
+        160
+      ],
+      "id": "3b9ac1cf-6c03-4766-b7a3-370d1d34b9d6",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Los datos de la factura vienen de Parsear Facturas\n// (que los tiene en el staticData recuperado al confirmar con SI)\nconst d = $('Parsear Facturas').item.json;\n\n// El enlace PDF viene del nodo de Drive\nconst webViewLink = $('Subir PDF a Google Drive').item.json.webViewLink || '';\n\nreturn [{\n  json: {\n    'Nº Factura': d.invoiceNumber || '',\n    'Cliente': d.cliente || '',\n    'NIF': d.nif || '',\n    'Concepto': d.concepto || '',\n    'Personas': d.personas || '',\n    'Precio Unitario': d.precioUnitario || '',\n    'Base Imponible': d.baseImponible || '',\n    'IVA': d.iva || '',\n    'Total': d.total || '',\n    'Fecha Servicio': d.fechaServicio || '',\n    'Fecha Emisión': d.fechaEmision || '',\n    'Forma de Pago': d.formaPago || '',\n    'Enlace PDF': webViewLink\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        400
+      ],
+      "id": "f675a3a2-8282-4781-b37d-a81d99067969",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "path": "webhook-placeholder-005",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1040,
+        768
+      ],
+      "id": "56ff49b4-899c-4e17-8096-6f413a9c53c4",
+      "name": "Webhook",
+      "webhookId": "webhook-placeholder-005"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "BASE DE DATOS",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Hoja 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -832,
+        768
+      ],
+      "id": "11b250f0-ae26-45f2-b30a-3c27932a01a3",
+      "name": "Get row(s) in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -624,
+        768
+      ],
+      "id": "2e1ce75c-a4ca-4294-92bf-c08386212373",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parsear Facturas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear Facturas": {
+      "main": [
+        [
+          {
+            "node": "¿Qué acción?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Qué acción?": {
+      "main": [
+        [
+          {
+            "node": "Obtener Último Nº",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar HTML Factura": {
+      "main": [
+        [
+          {
+            "node": "HTML a Binario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML a Binario": {
+      "main": [
+        [
+          {
+            "node": "Convertir a PDF (Gotenberg)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convertir a PDF (Gotenberg)": {
+      "main": [
+        [
+          {
+            "node": "Enviar Preview Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar HTML Confirmar": {
+      "main": [
+        [
+          {
+            "node": "HTML a Binario Confirmar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML a Binario Confirmar": {
+      "main": [
+        [
+          {
+            "node": "Convertir a PDF Confirmar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convertir a PDF Confirmar": {
+      "main": [
+        [
+          {
+            "node": "Subir PDF a Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Subir PDF a Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar en Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Telegram Guardado OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Preview Telegram": {
+      "main": [
+        []
+      ]
+    },
+    "Calcular Nº Factura": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Obtener Último Nº": {
+      "main": [
+        [
+          {
+            "node": "Calcular Nº Factura",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Generar HTML Factura",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generar HTML Confirmar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram Cancelado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram Cancelado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Registrar en Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get row(s) in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "38f179d1-9be6-4f8a-84c6-921b2432766a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "your-n8n-instance-id"
+  },
+  "id": "7Cf3Z2Kwp86dJi9L",
+  "tags": []
+}
